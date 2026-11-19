@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # release.yml runs the full CI before publishing.
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (dart ${{ matrix.sdk }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The SDK floor of pubspec.yaml and the latest stable.
+        sdk: ['3.0.0', stable]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: ${{ matrix.sdk }}
+      - run: dart pub get
+      # Formatter output and lint sets differ between SDKs: checked on the latest toolchain.
+      - name: Format and analyze
+        if: matrix.sdk == 'stable'
+        run: |
+          dart format --output=none --set-exit-if-changed .
+          dart analyze --fatal-infos
+      - run: dart test
+
+  # Package linters on the published artifact. pana includes the `pub downgrade` analysis (dependency
+  # lower bounds); the floor job above runs the tests on the oldest SDK.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+      - run: dart pub get
+      - run: dart pub publish --dry-run
+      # Max is 160. pana also checks that `repository` holds a pubspec.yaml on its default branch and that
+      # `homepage`/`documentation` (the docs site) answer: 10 points that exist only after the first merge
+      # to main and the first docs deploy. Everything else must be at max; set 0 once both are live.
+      - name: pana
+        run: |
+          dart pub global activate pana
+          dart pub global run pana --no-warning --exit-code-threshold 10 .
+      # Pack as `dart pub publish` does, check the archive, depend on it from an empty app,
+      # run the README "Testing" example against MockOnlineSim.
+      - name: Smoke from artifact
+        run: bash tool/smoke_artifact.sh

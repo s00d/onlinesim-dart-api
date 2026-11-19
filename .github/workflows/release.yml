@@ -1,0 +1,109 @@
+name: release
+
+# Push a version tag (vX.Y.Z) to publish to pub.dev and create the GitHub release.
+# pub.dev automated publishing via GitHub OIDC: no token. On pub.dev (package admin → automated
+# publishing) this repository, the tag pattern `v{{version}}` and the `release` environment are pinned.
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches pubspec.yaml and CHANGELOG.md
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n 's/^version: *//p' pubspec.yaml)
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::tag $TAG does not match pubspec.yaml version $version"
+            exit 1
+          fi
+          if ! grep -qx "## $version" CHANGELOG.md; then
+            echo "::error::no '## $version' section in CHANGELOG.md"
+            exit 1
+          fi
+
+  # Is the tag's version already on pub.dev? 1.0.0 is published by hand before automated publishing
+  # is enabled; its tag then only creates the GitHub release.
+  published:
+    runs-on: ubuntu-latest
+    outputs:
+      exists: ${{ steps.check.outputs.exists }}
+    steps:
+      - id: check
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          status=$(curl -sS -o package.json -w '%{http_code}' https://pub.dev/api/packages/onlinesim)
+          case "$status" in
+            404) exists=false ;;
+            200)
+              if jq -e --arg v "$version" 'any(.versions[]; .version == $v)' package.json > /dev/null; then
+                exists=true
+              else
+                exists=false
+              fi
+              ;;
+            *)
+              echo "::error::pub.dev answered HTTP $status"
+              exit 1
+              ;;
+          esac
+          echo "onlinesim $version on pub.dev: $exists"
+          echo "exists=$exists" >> "$GITHUB_OUTPUT"
+
+  # The official reusable workflow: dry run, archive, then `dart pub publish` with the OIDC token,
+  # in the `release` environment. Skipped when the version is already on pub.dev.
+  publish:
+    needs: [ci, version, published]
+    if: needs.published.outputs.exists == 'false'
+    permissions:
+      id-token: write
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@v1
+    with:
+      environment: release
+      use-flutter: false
+
+  # Runs after a successful publish, or when publish was skipped because the version is already on
+  # pub.dev. A failed or cancelled publish (or any failed check) blocks it.
+  github-release:
+    needs: [ci, version, published, publish]
+    if: >-
+      always() &&
+      needs.ci.result == 'success' &&
+      needs.version.result == 'success' &&
+      needs.published.result == 'success' &&
+      (needs.publish.result == 'success' ||
+       (needs.publish.result == 'skipped' && needs.published.outputs.exists == 'true'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "release $TAG exists, skipping"
+            exit 0
+          fi
+          version="${TAG#v}"
+          awk -v head="## $version" '$0 == head { found = 1; next } found && /^## / { exit } found { print }' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::no '## $version' section in CHANGELOG.md"
+            exit 1
+          fi
+          gh release create "$TAG" --title "$TAG" --latest --notes-file release-notes.md
