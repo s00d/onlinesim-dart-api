@@ -1,0 +1,14 @@
+# .pubignore replaces .gitignore for `dart pub publish`: its entries are repeated here.
+.dart_tool/
+build/
+pubspec.lock
+doc/api/
+.env
+.DS_Store
+*.log
+
+# Not part of the package: the docs site (Nuxt), tests, CI and repo tooling.
+/docs/
+/test/
+/tool/
+/.github/
