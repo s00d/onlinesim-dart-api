@@ -1,0 +1,648 @@
+# Changelog
+
+The full history is in [CHANGELOG.md](https://github.com/s00d/onlinesim-dart-api/blob/main/CHANGELOG.md){rel="&#x22;nofollow&#x22;"}.
+
+## 1.0.1
+
+- Fixed models against the current API: `Profile.number`/`country`, `RentSms.code` `'0'` for `notify` SMS, nullable free-list and payment fields; `paymentHistory().paylist` is kept when it arrives as a list; `Balance.available` = balance − max(zbalance, 0).
+- `waitCode` retries `TRY_AGAIN_LATER` (rate limit), `ERROR_UNDEFINED` and `INTERVAL_CONCURRENT_REQUESTS_ERROR`.
+- `MockOnlineSim` follows the backend more closely: rent reservation and confirmation, `setOperationRevise` and `closeRentNum` answers, missing vs wrong key — see [Testing](https://s00d.github.io/onlinesim-dart-api/testing).
+
+## 1.0.0
+
+First release.
+
+- One client, `OnlineSim(apiKey: ...)`, with the sections as properties: `client.numbers`, `client.rent`, `client.user`, `client.free`.
+- Pure Dart on `package:http`: Flutter, CLI, server and web; injectable `OnlineSimTransport`.
+- The key is sent as a Bearer header, never in the URL.
+- Typed results and sealed exceptions: `ApiException`, `NoNumberException`, `TransportException`, `WaitTimeoutException`.
+- `numbers.waitCode` with `Duration` interval and timeout, `keepOpen`, `since`; retries network errors.
+- `user.setWebhookUrl` / `clearWebhookUrl` / `webhookLogs`, `parseWebhook`.
+- `MockOnlineSim`, an offline fake of the API for your tests — see [Testing](https://s00d.github.io/onlinesim-dart-api/testing).
+
+
+# Free numbers
+
+## list
+
+Countries, the numbers of the selected country and the SMS of the selected number, in one call.
+
+```dart
+Future<FreeList> list({int? country, String? number, int? page, int? count})
+```
+
+| Option    | Type      | Default        | Description                                                     |
+| --------- | --------- | -------------- | --------------------------------------------------------------- |
+| `country` | `int?`    | `44` (server)  | Country code; an unknown one falls back to the first available. |
+| `number`  | `String?` | first number   | Number **without** the country code, as the keys of `numbers`.  |
+| `page`    | `int?`    | `1`            | Page of `messages`.                                             |
+| `count`   | `int?`    | server default | SMS per page, 10–500.                                           |
+
+`FreeList`:
+
+- `countries`: `List<FreeCountry>` — `country`, `countryText?`, `countryOriginal?` (`null` when the server has no name)
+- `numbers`: `Map<String, FreeNumber>` keyed by the short number — `country`, `countryOriginal?`, `fullNumber`, `dataHumans`, `isArchive`
+- `messages`: `FreeMessages`, a paginator of `FreeMessage` (`id`, `text`, `inNumber`, `myNumber`, `code`, `createdAt`, `dataHumans`) plus `number` and `country`; `code` is `-` when no code was found
+
+```dart
+final list = await client.free.list(country: 44);
+final short = list.numbers.keys.firstOrNull;
+if (short != null) {
+  final page = await client.free.list(country: 44, number: short, count: 20);
+  for (final sms in page.messages.data) {
+    print('${sms.inNumber} ${sms.code} ${sms.text}');
+  }
+}
+```
+
+
+# Numbers
+
+An operation (`tzid`) is one ordered number. Order it with `get`/`getWithNumber`, read the SMS with `stateOne` or `waitCode`, finish it with `close` (or `ban`). Countries are phone codes (`7`, `44`, …), services are slugs (`google`, `vkcom`, …) as returned by `tariffs`.
+
+## price
+
+Price of one number, USD; `null` when the country has no price for the service.
+
+```dart
+Future<double?> price(String service, {int country = 7})
+```
+
+| Param     | Type     | Default | Description   |
+| --------- | -------- | ------- | ------------- |
+| `service` | `String` | —       | Service slug. |
+| `country` | `int`    | `7`     | Country code. |
+
+```dart
+final usd = await client.numbers.price('google', country: 44);
+```
+
+Errors: `ApiException` `ERROR_NO_SERVICE`, `UNDEFINED_COUNTRY`.
+
+## get
+
+Order a number; returns the operation id. Freezes the price on the balance.
+
+```dart
+Future<int> get(String service, {int country = 7, Iterable<Object>? reject})
+```
+
+| Param     | Type                | Default      | Description                               |
+| --------- | ------------------- | ------------ | ----------------------------------------- |
+| `service` | `String`            | —            | Service slug.                             |
+| `country` | `int`               | `7`          | Country code.                             |
+| `reject`  | `Iterable<Object>?` | profile list | Number prefixes to skip, e.g. `['4470']`. |
+
+```dart
+final tzid = await client.numbers.get('google', country: 44, reject: ['4470']);
+```
+
+Errors: `NoNumberException`; `ApiException` `WARNING_LOW_BALANCE`, `ERROR_NO_SERVICE`, `UNDEFINED_COUNTRY`, `EXCEEDED_CONCURRENT_OPERATIONS`, `INTERVAL_CONCURRENT_REQUESTS_ERROR`, `TRY_AGAIN_LATER`.
+
+## getWithNumber
+
+Same as `get`, but returns the number right away.
+
+```dart
+Future<NumberOrder> getWithNumber(String service, {int country = 7, Iterable<Object>? reject})
+```
+
+Returns `NumberOrder`: `tzid`, `number` (with `+`), `country`, `time` (seconds left), `service`, `title?`, `guardIntervalRemainingSeconds?`.
+
+```dart
+final order = await client.numbers.getWithNumber('google', country: 44);
+print('${order.tzid} ${order.number}');
+```
+
+Errors: as `get`.
+
+## state
+
+All operations of the account; `[]` when there are none.
+
+```dart
+Future<List<Operation>> state({bool messageToCode = true, SortOrder orderBy = SortOrder.asc, bool msgList = false})
+```
+
+| Option          | Type        | Default         | Description                                           |
+| --------------- | ----------- | --------------- | ----------------------------------------------------- |
+| `messageToCode` | `bool`      | `true`          | `msg` is the code only; `false` — the full SMS text.  |
+| `orderBy`       | `SortOrder` | `SortOrder.asc` | Order of operations.                                  |
+| `msgList`       | `bool`      | `false`         | Fill `msgList` with every SMS (`List<OperationSms>`). |
+
+`Operation`: `tzid`, `response` (empty when the server sends none: no number issued yet), `number?`, `service?`, `country?`, `sum?`, `time?`, `msg?`, `msgList?`, `guardIntervalRemainingSeconds?`, …
+`response` is the state (constants in `OperationStatus`): `TZ_INPOOL` (number being assigned), `TZ_NUM_WAIT` (waiting for SMS), `TZ_NUM_ANSWER` (SMS arrived), `TZ_OVER_OK` (finished), `ERROR_NO_ITEMS` (failed). `msg` is `null` until the first SMS. The server caches answers for a few seconds.
+
+```dart
+for (final op in await client.numbers.state(orderBy: SortOrder.desc)) {
+  print('${op.tzid} ${op.response} ${op.msg}');
+}
+```
+
+## stateOne
+
+One operation.
+
+```dart
+Future<Operation> stateOne(int tzid, {bool messageToCode = true, bool msgList = false})
+```
+
+```dart
+final op = await client.numbers.stateOne(tzid);
+if (op.response == OperationStatus.numAnswer) print(op.msg);
+```
+
+Errors: `ApiException` `ERROR_NO_OPERATIONS` when the operation does not exist (any more).
+
+## waitCode
+
+Poll the operation until a code arrives, then close it and return the code.
+
+```dart
+Future<String> waitCode(int tzid, {Duration interval = const Duration(seconds: 5), Duration timeout = const Duration(minutes: 10), bool keepOpen = false, bool fullMessage = false, String? since, Future<void> Function(Duration)? sleep, DateTime Function()? now})
+```
+
+| Option         | Type       | Default                          | Description                                                          |
+| -------------- | ---------- | -------------------------------- | -------------------------------------------------------------------- |
+| `interval`     | `Duration` | 5 s                              | Poll interval.                                                       |
+| `timeout`      | `Duration` | 10 min                           | Give up after.                                                       |
+| `keepOpen`     | `bool`     | `false`                          | Call `next(tzid)` instead of `close(tzid)`, to wait for another SMS. |
+| `fullMessage`  | `bool`     | `false`                          | Return the full SMS text instead of the code.                        |
+| `since`        | `String?`  | `null`                           | Ignore this value (the previous code).                               |
+| `sleep`, `now` | functions  | `Future.delayed`, `DateTime.now` | Injectable for tests.                                                |
+
+Transient errors are retried until the timeout: `TransportException`, and `ApiException` `TRY_AGAIN_LATER` (the HTTP 429 rate limit), `ERROR_UNDEFINED` and `INTERVAL_CONCURRENT_REQUESTS_ERROR`. Any other `ApiException` is thrown at once.
+
+```dart
+final first = await client.numbers.waitCode(tzid, keepOpen: true);
+final second = await client.numbers.waitCode(tzid, since: first);
+```
+
+Errors: `WaitTimeoutException`; `ApiException` with code `TZ_OVER_OK` or `ERROR_NO_ITEMS` when the operation ended without a new code; any other `ApiException` from `stateOne`/`close`/`next`.
+
+## next
+
+Switch the operation to its next SMS and keep it open (for services that send several SMS).
+
+```dart
+Future<void> next(int tzid)
+```
+
+```dart
+await client.numbers.next(tzid);
+```
+
+Errors: `ApiException` `ERROR_WRONG_TZID` (not an operation of your account), `ERROR_NO_TZID`.
+
+## close
+
+Finish the operation. An operation without SMS can be closed only after its guard interval (`guardIntervalRemainingSeconds`); every attempt locks the tzid for 5 s.
+
+```dart
+Future<void> close(int tzid)
+```
+
+```dart
+await client.numbers.close(tzid);
+```
+
+Errors: `ApiException` `NO_COMPLETE_TZID`, `INTERVAL_CONCURRENT_REQUESTS_ERROR`, `ERROR_WRONG_TZID`.
+
+## ban
+
+Finish the operation and report the number as bad. Only before any SMS arrived.
+
+```dart
+Future<void> ban(int tzid)
+```
+
+```dart
+await client.numbers.ban(tzid);
+```
+
+Errors: as `close`; `ApiException` with code `"0"` when the operation already has an SMS — nothing is changed then.
+
+## tariffs
+
+Services, prices and stock of every country, keyed by country code. No API key needed. The answer is large (a few MB); prefer `tariffsOne`.
+
+```dart
+Future<Map<int, CountryStat>> tariffs()
+```
+
+`CountryStat`: `name`, `localeName?`, `position`, `code`, `other?`, `isNew`, `enabled`, `services`; `services` maps `service_<slug>` to `ServiceStat` (`count?`, `popular`, `code`, `price`, `id`, `service`, `slug`). `count` is `null` when the server reports the stock as unknown.
+
+```dart
+final all = await client.numbers.tariffs();
+print('${all.length} countries');
+```
+
+## tariffsOne
+
+Services, prices and stock of one country.
+
+```dart
+Future<CountryStat> tariffsOne({int country = 7})
+```
+
+```dart
+final uk = await client.numbers.tariffsOne(country: 44);
+for (final s in uk.services.values) {
+  print('${s.slug} ${s.price} ${s.count}');
+}
+```
+
+Errors: `ApiException` `NO_COUNTRY`.
+
+
+# Rent
+
+A rent keeps a number for `days` days. Its SMS come in `RentItem.messages`, newest first.
+
+`get` reserves the price (it shows in `zbalance`): the rent starts with `status` `0` and `checked` `false` and waits up to 20 minutes for its first SMS. The first SMS that is not a `notify` notice confirms it (`status` `1`) and charges the price; without one the rent closes and the reservation is released. Some countries (`confirm` in `tariffs`, e.g. US numbers) are confirmed and charged at once.
+
+`RentItem`: `tzid`, `status`, `number`, `country`, `sum`, `days`, `hours`, `time`, `timeSeconds?`, `extension`, `extend`, `messages`, `startTime`, `stopTime`, `dayExtend?`, … —
+`sum` is the cost in USD incl. extensions (a `double`; the server sends a number, or a decimal string in `state`), `time` minutes left, `timeSeconds` seconds left,
+`extension` `0` not extendable / `1` extendable / `2` auto-extension, `extend` maps days to the extension price (`{}` when not extendable),
+`messages` is `List<RentSms>`: `id`, `service`, `text`, `code`, `createdAt` — `code` is `''` when no code was found and `'0'` for a `notify` SMS (a prohibited sender; the server sends the integer `0`).
+
+## get
+
+Rent a number. The price is reserved; the first SMS charges it.
+
+```dart
+Future<RentItem> get({int country = 7, int days = 1, bool extension = true})
+```
+
+| Param       | Type   | Default | Description                                     |
+| ----------- | ------ | ------- | ----------------------------------------------- |
+| `country`   | `int`  | `7`     | Country code.                                   |
+| `days`      | `int`  | `1`     | One of the tariff's `days` keys.                |
+| `extension` | `bool` | `true`  | `false` makes the rent non-extendable for good. |
+
+```dart
+final rent = await client.rent.get(country: 7, days: 7);
+print('${rent.tzid} ${rent.number} ${rent.sum}');
+```
+
+Errors: `NoNumberException`; `ApiException` `UNDEFINED_DAYS`, `UNDEFINED_COUNTRY`, `WARNING_LOW_BALANCE`, `INTERVAL_CONCURRENT_REQUESTS_ERROR`, `TRY_AGAIN_LATER`.
+
+## state
+
+All rents of the account.
+
+```dart
+Future<List<RentItem>> state()
+```
+
+```dart
+for (final rent in await client.rent.state()) {
+  print('${rent.number} ${rent.messages.firstOrNull?.code}');
+}
+```
+
+## stateOne
+
+One rent.
+
+```dart
+Future<RentItem> stateOne(int tzid)
+```
+
+```dart
+final messages = (await client.rent.stateOne(tzid)).messages;
+```
+
+Errors: `ApiException` `ERROR_NO_OPERATIONS` for an unknown tzid.
+
+## extend
+
+Extend a rent by `days` days and charge the balance at once. Only confirmed rents (`status` `1` or `4`) created with `extension: true`.
+
+```dart
+Future<RentItem> extend(int tzid, {int days = 1})
+```
+
+```dart
+final rent = await client.rent.extend(tzid, days: 3);
+print(rent.stopTime);
+```
+
+Errors: `ApiException` `TRY_AGAIN_LATER` (unknown tzid, not confirmed yet or closed, not extendable, unknown period, a repeat within 10 s), `WARNING_LOW_BALANCE`.
+
+## close
+
+Return the number before the period ends. A rent that is not confirmed yet (`status` `0`) and has no SMS can be closed only after 120 s; then, or with only `notify` SMS, the reservation is released. With a real SMS the rent is confirmed (charged) and closed. A confirmed rent closes without a refund. US numbers cannot be closed early.
+
+```dart
+Future<void> close(int tzid)
+```
+
+```dart
+await client.rent.close(tzid);
+```
+
+Errors: `ApiException` `ERROR_NO_OPERATIONS`, `NO_COMPLETE_TZID`, `NO_CLOSE_RENT_US`, `TRY_AGAIN_LATER`.
+
+## tariffs
+
+Rent prices of every country, keyed by country code. No API key needed.
+
+```dart
+Future<Map<int, RentTariff>> tariffs()
+```
+
+`RentTariff`: `code`, `name`, `enabled`, `isNew`, `position`, `extend`, `confirm?`, `days`, `count`, `extCounts` — `days` maps rent days to the price in USD, `count` to the numbers available.
+
+```dart
+final tariffs = await client.rent.tariffs();
+```
+
+## tariffsOne
+
+Rent prices of one country.
+
+```dart
+Future<RentTariff> tariffsOne({int country = 7})
+```
+
+```dart
+final tariff = await client.rent.tariffsOne(country: 7);
+print(tariff.days[7]); // price of 7 days
+```
+
+Errors: `ApiException` `NO_COUNTRY` for a country without rent.
+
+
+# Testing
+
+`MockOnlineSim` is an in-process fake of the OnlineSim API that ships with the package. It is an `OnlineSimTransport` that answers like the real backend — same shapes, same error codes, HTTP 456 for a wrong key, HTTP 200 `ERROR_WRONG_KEY` for none — and keeps a balance, operations and rents. Your code talks to a normal `OnlineSim` client, so nothing in it changes for tests. It is deterministic: no randomness, no clock, numbers and ids come from a counter.
+
+## Setup
+
+```dart
+import 'package:onlinesim/onlinesim.dart';
+
+final mock = MockOnlineSim(balance: 10);
+final client = mock.client(); // an OnlineSim wired to the mock
+```
+
+```dart
+MockOnlineSim({String apiKey = 'mock-key', double balance = 100, MockPrices prices = defaultMockPrices, Map<int, MockRentTariff> rentTariffs = defaultMockRentTariffs, int guardInterval = 0})
+```
+
+| Option          | Default                                                                                   | Description                                                                                                              |
+| --------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `apiKey`        | `'mock-key'`                                                                              | Key the mock accepts. `mock.client()` uses it; `mock.client(apiKey: 'x')` tests a wrong key.                             |
+| `balance`       | `100`                                                                                     | Starting balance, USD.                                                                                                   |
+| `prices`        | `{7: {'vkcom': 0.5, 'telegram': 1.2, 'google': 0.3}, 44: {'google': 0.2, 'vkcom': 0.36}}` | Number prices (country → service → USD); replaces the defaults. Also feeds `numbers.tariffs()`.                          |
+| `rentTariffs`   | `{7: MockRentTariff(days: {1: 1.0, 3: 2.5, 7: 5.0})}`                                     | Rent prices; `extend: 0` makes rents of that country non-extendable.                                                     |
+| `guardInterval` | `0`                                                                                       | Seconds; `> 0`: an operation without SMS, or an unconfirmed rent without any SMS, cannot be closed (`NO_COMPLETE_TZID`). |
+
+`mock.client(apiKey:, lang:, devId:, timeout:)` takes the usual [client options](https://s00d.github.io/onlinesim-dart-api/#client-options) except the transport. To build the client yourself, pass the mock as the `transport`; any `baseUrl` works:
+
+```dart
+import 'package:onlinesim/onlinesim.dart';
+
+final mock = MockOnlineSim();
+final client = OnlineSim(apiKey: 'mock-key', transport: mock);
+```
+
+## A full example
+
+Order a number, let an SMS arrive while `waitCode` polls, check the code and the money. `addSmsAfter` delivers the SMS after a number of polls instead of after some time, so `waitCode` runs with `interval: Duration.zero` and the test takes milliseconds.
+
+```dart
+import 'package:onlinesim/onlinesim.dart';
+import 'package:test/test.dart';
+
+void main() {
+  test('receives the code', () async {
+    final mock = MockOnlineSim(balance: 10);
+    final client = mock.client();
+
+    final order = await client.numbers.getWithNumber('google', country: 44);
+    expect(order.number, '+44900000001');
+
+    mock.addSmsAfter(order.tzid, 'Your Google code: 123-456', 2); // the third poll sees it
+    final code = await client.numbers.waitCode(order.tzid, interval: Duration.zero);
+
+    expect(code, '123456');
+    expect(mock.operations().single.status, 'TZ_OVER_OK'); // waitCode closed it
+    expect(mock.balance(), 9.8); // the price is spent once an SMS arrived
+  });
+}
+```
+
+The `msg` of an operation is the code by default: the first run of 4–8 digits, with spaces and dashes between digits removed (`123-456` → `123456`); a text without such a run comes back whole. `messageToCode: false` (or `fullMessage` in `waitCode`) gives the full text.
+
+## Errors
+
+`failNext(code)` makes the next request answer `{"response": code}` — the client turns it into `ApiException` (or `NoNumberException`) exactly as for the real server. Pass `endpoint` to fail only that endpoint. `failNextTransport()` makes the next request fail with a non-JSON HTTP 502 (`TransportException`).
+
+```dart
+import 'package:onlinesim/onlinesim.dart';
+import 'package:test/test.dart';
+
+void main() {
+  test('handles a missing number and a network hiccup', () async {
+    final mock = MockOnlineSim();
+    final client = mock.client();
+
+    mock.failNext('NO_NUMBER', endpoint: 'getNum.php');
+    await expectLater(client.numbers.get('google'), throwsA(isA<NoNumberException>()));
+
+    mock.failNextTransport(status: 503);
+    await expectLater(client.user.balance(), throwsA(isA<TransportException>()));
+
+    expect((await client.user.balance()).balance, 100); // one-shot
+  });
+}
+```
+
+The state itself produces the real error codes too: `WARNING_LOW_BALANCE` when the balance is short, `NO_NUMBER` when `reject` matches the next number, `UNDEFINED_COUNTRY` / `ERROR_NO_SERVICE` for unknown prices, `ERROR_WRONG_TZID` for an unknown or closed operation (`next` too; `ERROR_NO_TZID` for tzid `0`), `UNDEFINED_COUNTRY` / `UNDEFINED_DAYS` for an unknown rent country or period, `TRY_AGAIN_LATER` for every refused `rent.extend`, `ERROR_NO_OPERATIONS` for an unknown rent in `rent.close`, `ERROR_WRONG_KEY` for a wrong key (HTTP 456) or no key (HTTP 200).
+
+## Inspecting requests
+
+`mock.requests` lists every request received: `MockRequest` with `method`, `path`, `query`, `body`; `path` is relative to `/api/`.
+
+```dart
+import 'package:onlinesim/onlinesim.dart';
+import 'package:test/test.dart';
+
+void main() {
+  test('sends reject as a comma list', () async {
+    final mock = MockOnlineSim();
+    await mock.client().numbers.get('google', country: 44, reject: ['4470', '4471']);
+
+    final request = mock.requests.single;
+    expect(request.path, 'getNum.php');
+    expect(request.query, {'service': 'google', 'country': '44', 'reject': '4470,4471', 'lang': 'en'});
+  });
+}
+```
+
+## Control API
+
+| Member                                      | Description                                                                                                                |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `client({apiKey, lang, devId, timeout})`    | A normal `OnlineSim` wired to the mock.                                                                                    |
+| `send(request)`                             | The mock is an `OnlineSimTransport`: pass it as `transport`.                                                               |
+| `addSms(tzid, text, {service})`             | An SMS arrives now at a number operation or a rent (detected by `tzid`). Throws `StateError` for an unknown or closed one. |
+| `addSmsAfter(tzid, text, polls, {service})` | The SMS arrives after `polls` state requests for `tzid` (`numbers.state`/`stateOne`, `rent.state`/`stateOne`).             |
+| `failNext(code, {endpoint})`                | The next request (to `endpoint` only, e.g. `'getNum.php'`) answers `{"response": code}`.                                   |
+| `failNextTransport({status, endpoint})`     | The next request fails with a non-JSON body and HTTP `status` (default `502`).                                             |
+| `setBalance(usd)` / `balance()`             | Set / read the total balance, USD (it includes the part frozen by open operations, as `user.balance()` reports it).        |
+| `operations()` / `rents()`                  | Snapshots of the current number operations (`MockOperation`) / open rents (`MockRent`), for assertions.                    |
+| `requests`                                  | Log of the requests received.                                                                                              |
+| `reset()`                                   | Back to the constructor's state.                                                                                           |
+
+## What the mock does
+
+- **Numbers**: `get` freezes the price; `close` after an SMS spends it, `close` without one refunds it; `ban` after an SMS answers `"0"`, like the server. Numbers are `+<country>9000000NN`, ids count from 1. `next` switches to the following SMS. The operation's `time` stays at 1200 s — there is no clock.
+- **Rent**: `get` reserves the price (`status` `0`, `checked` `false`) and keeps the `extension` flag; the first SMS that is not `notify` confirms the rent (`status` `1`) and charges it — `addSms(tzid, text, service: 'notify')` adds a notice with `code` `0` that confirms nothing. `extend` works on a confirmed rent and charges at once. `close` releases the reservation of an unconfirmed rent and gives no refund for a confirmed one. `sum` is a number in `get`/`extend` and a decimal string on the wire of `state`, like the server. SMS appear in `messages`, newest first.
+- **User**: `balance` (frozen part included), a fixed profile, `setWebhookUrl` accepts any `scheme://…` URL (`VALIDATION_ERROR` otherwise), `webhookLogs` lists the deliveries the mock *recorded* when an SMS arrived while a webhook URL was set — it makes no HTTP call; their `params` follow the real payload (`code` `''` without a code, rent `number` in digits without `+`, rent `timeLeft` in minutes). `paymentHistory` has no orders.
+- **Free**: `free.list` returns two fixed countries (44 first) with one number and a few SMS each.
+- Not imitated: anything that needs real time — the 5 s lock after `setOperationOk` (`INTERVAL_CONCURRENT_REQUESTS_ERROR`), the 10 s lock of `rent.extend`, the 120 s before an unconfirmed rent may be closed and its 20-minute wait for the first SMS. `guardInterval > 0` stands in for "too early to close".
+
+
+# User
+
+## balance
+
+Balance in USD.
+
+```dart
+Future<Balance> balance()
+```
+
+`Balance`: `balance`, `zbalance`, `income?`, and the getter `available`. `balance` includes the sum frozen by numbers and unconfirmed rents in progress (`zbalance`, which may be negative): `available` = `balance − max(zbalance, 0)`. `income` is the partner income. The server caches the answer for 60 s.
+
+```dart
+final balance = await client.user.balance();
+print('${balance.available} of ${balance.balance} USD available');
+```
+
+Errors: `ApiException` `ERROR_WRONG_KEY`, `ACCOUNT_BLOCKED`, `API_ACCESS_DISABLED`, `API_ACCESS_IP`.
+
+## profile
+
+The account profile.
+
+```dart
+Future<Profile> profile()
+```
+
+`Profile`: `id`, `name?`, `username?`, `email?`, `locale?`, `currency?`, `numberCountry?`, `numberReject`, `webhookUrl?`, `apiAccess?`, `number?` (`int`), `country?` (`String`), …
+
+```dart
+final profile = await client.user.profile();
+print('${profile.email} ${profile.webhookUrl}');
+```
+
+## paymentHistory
+
+Top-up orders (paginated, newest first) and the available payment methods.
+
+```dart
+Future<PaymentHistory> paymentHistory({int page = 1})
+```
+
+`PaymentHistory`: `orders` (`Paginator<PaymentOrder>`), `paylist`, `domains`, `currency`. `PaymentOrder.sum` stays a decimal string (`"89.00"`); `currency` and `formText` may be `null`; `PaymentOrder.raw` holds every field as sent. `paylist` maps a group id to its payment methods; when the server sends it as a JSON array (ids 0, 1, 2…) the keys are `'0'`, `'1'`, …
+
+```dart
+final orders = (await client.user.paymentHistory()).orders;
+print('${orders.total} orders, page ${orders.currentPage}/${orders.lastPage}');
+```
+
+## setWebhookUrl
+
+Set the URL that receives SMS webhooks (see [Webhooks](https://s00d.github.io/onlinesim-dart-api/webhooks)).
+
+```dart
+Future<void> setWebhookUrl(String url)
+```
+
+```dart
+await client.user.setWebhookUrl('https://example.com/onlinesim-hook');
+```
+
+Errors: `ApiException` `VALIDATION_ERROR` for an invalid URL; `message` holds the server's field messages.
+
+## clearWebhookUrl
+
+Remove the webhook URL, also from operations in progress.
+
+```dart
+Future<void> clearWebhookUrl()
+```
+
+```dart
+await client.user.clearWebhookUrl();
+```
+
+## webhookLogs
+
+Webhook delivery log, newest first, 10 per page.
+
+```dart
+Future<Paginator<WebhookLog>> webhookLogs({int page = 1})
+```
+
+`WebhookLog`: `id`, `userId`, `webhookUrl`, `type`, `params`, `status`, `error?`, `createdAt`, `updatedAt` — `type` is `WebhookType.receivingSms` or `WebhookType.rentSms`, `status` is `success`, `fail` or `pending`, `params` the payload that was sent (a `WebhookPayload`).
+
+```dart
+final logs = await client.user.webhookLogs();
+for (final log in logs.data) {
+  print('${log.createdAt} ${log.status} ${log.error}');
+}
+```
+
+
+# Webhooks
+
+Set a URL with [`client.user.setWebhookUrl`](https://s00d.github.io/onlinesim-dart-api/user#setwebhookurl). For each SMS the server POSTs a JSON body to it: `webhook_type` `receiving_sms` for numbers, `rent_sms` for rents. Delivery attempts are listed by [`client.user.webhookLogs`](https://s00d.github.io/onlinesim-dart-api/user#webhooklogs).
+
+## parseWebhook
+
+Parse an inbound webhook body from a JSON string or an already decoded map.
+
+```dart
+WebhookPayload parseWebhook(Object payload)
+```
+
+Lenient: numeric fields may arrive as strings, missing or malformed fields become `null`, unknown fields are dropped. It throws `WebhookFormatException` only when the input is not a JSON object.
+
+```dart
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:onlinesim/onlinesim.dart';
+
+Future<void> main() async {
+  final server = await HttpServer.bind(InternetAddress.anyIPv4, 8080);
+  await for (final request in server) {
+    final hook = parseWebhook(await utf8.decoder.bind(request).join());
+    if (hook.webhookType == WebhookType.receivingSms) {
+      print('${hook.operationId} ${hook.code}');
+    }
+    request.response.write('ok');
+    await request.response.close();
+  }
+}
+```
+
+## Payload fields
+
+| Field         | Wire name      | Type           | Description                                                                                                                  |
+| ------------- | -------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `webhookType` | `webhook_type` | `WebhookType?` | `receivingSms` or `rentSms`.                                                                                                 |
+| `operationId` | `operation_id` | `int?`         | `tzid` of the operation or rent.                                                                                             |
+| `userId`      | `user_id`      | `int?`         | Account id.                                                                                                                  |
+| `countryCode` | `country_code` | `int?`         | Country code of the number.                                                                                                  |
+| `number`      | `number`       | `String?`      | Numbers: `+` and the full number (`+79001234567`), or `hidden`. Rent: the full number in digits without `+` (`79001234567`). |
+| `sender`      | `sender`       | `String?`      | Sender of the SMS, e.g. `VK`.                                                                                                |
+| `message`     | `message`      | `String?`      | Full SMS text.                                                                                                               |
+| `code`        | `code`         | `String?`      | Code extracted from the SMS; `''` when none was found.                                                                       |
+| `timeStart`   | `time_start`   | `String?`      | Numbers: when the operation was ordered. Rent: when the SMS arrived. `YYYY-MM-DD HH:MM:SS`.                                  |
+| `timeLeft`    | `time_left`    | `int?`         | Time left: seconds for numbers, minutes for rent.                                                                            |
