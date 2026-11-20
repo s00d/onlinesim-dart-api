@@ -13,8 +13,10 @@ final class RentApi {
 
   final RequestFn _request;
 
-  /// Rents a number for [days] days. `extension: false` makes the rent
-  /// non-extendable for good.
+  /// Rents a number for [days] days. The price is reserved (it shows in
+  /// `zbalance`) and the rent starts with `status` 0; the first SMS that is
+  /// not `notify` confirms it and charges the price. `extension: false` makes
+  /// the rent non-extendable for good.
   Future<RentItem> get({
     int country = 7,
     int days = 1,
@@ -47,8 +49,9 @@ final class RentApi {
     return list.first;
   }
 
-  /// Extends a rent by [days] days (only rents created with
-  /// `extension: true`).
+  /// Extends a rent by [days] days and charges at once. Only confirmed rents
+  /// created with `extension: true`; every refusal is
+  /// `ApiException('TRY_AGAIN_LATER')`.
   Future<RentItem> extend(int tzid, {int days = 1}) async {
     final res = asMap(await _request(
       'rent/extendRentState.php',
@@ -78,7 +81,10 @@ final class RentApi {
     return RentTariff.fromJson(asMap(res));
   }
 
-  /// Returns the number before the rent period ends.
+  /// Returns the number before the rent period ends. An unconfirmed rent
+  /// (`status` 0, no SMS or only `notify`) releases its reservation; a
+  /// confirmed one closes without a refund. Throws
+  /// `ApiException('ERROR_NO_OPERATIONS')` for an unknown tzid.
   Future<void> close(int tzid) async {
     await _request('rent/closeRentNum.php', query: {'tzid': tzid});
   }

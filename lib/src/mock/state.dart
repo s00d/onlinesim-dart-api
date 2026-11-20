@@ -22,9 +22,10 @@ final class MockSms {
     required this.service,
     required this.text,
     required this.code,
+    required int at,
     this.id,
     this.createdAt,
-  });
+  }) : _at = at;
 
   /// Service of the SMS.
   final String service;
@@ -40,6 +41,9 @@ final class MockSms {
 
   /// Arrival time (rent SMS only).
   final String? createdAt;
+
+  /// Seconds after the mock epoch when it arrived.
+  final int _at;
 }
 
 /// A number operation as the mock stores it (a snapshot).
@@ -103,6 +107,7 @@ final class MockRent {
     required double sum,
     required this.extension,
   })  : _days = days,
+        initialDays = days,
         _sum = sum;
 
   /// Rent id.
@@ -117,15 +122,23 @@ final class MockRent {
   /// Created extendable.
   final bool extension;
 
+  /// The initial period (`days` of getRentNum).
+  final int initialDays;
+
   int _days;
   double _sum;
+  int _status = 0;
   final List<MockSms> _messages = [];
 
-  /// Rent period, days (grows with `extend`).
+  /// Total rent days: the initial period plus extensions.
   int get days => _days;
 
-  /// Total paid, USD.
+  /// Total cost incl. extensions, USD. Frozen while [status] is 0.
   double get sum => _sum;
+
+  /// `0`: reserved, waiting for the first SMS; `1`: confirmed by an SMS that
+  /// is not `notify`, price charged.
+  int get status => _status;
 
   /// SMS received, oldest first.
   List<MockSms> get messages => List.unmodifiable(_messages);
@@ -134,10 +147,13 @@ final class MockRent {
         tzid: tzid,
         country: country,
         number: number,
-        days: _days,
+        days: initialDays,
         sum: _sum,
         extension: extension,
-      ).._messages.addAll(_messages);
+      )
+        .._days = _days
+        .._status = _status
+        .._messages.addAll(_messages);
 }
 
 /// One request the mock received.
@@ -201,6 +217,14 @@ const Map<int, MockRentTariff> defaultMockRentTariffs = {
 
 const _userId = 1;
 
+/// Sender of a rent SMS from a prohibited sender: it gets the integer `code`
+/// `0` and does not confirm the rent.
+const _notify = 'notify';
+
+/// Minutes an unconfirmed rent waits for its first SMS (`stop_time` = start +
+/// this).
+const _rentFirstSmsMinutes = 20;
+
 /// Seconds an operation stays open, as reported in `time`. The mock has no
 /// clock, so it never runs down.
 const _operationTime = 1200;
@@ -251,7 +275,7 @@ final class _MockState {
   /// Total balance incl. the frozen part, mills.
   int balance = 0;
 
-  /// Frozen by open operations, mills.
+  /// Frozen by open operations and unconfirmed rents, mills.
   int frozen = 0;
   final Map<int, MockOperation> operations = {};
   final Map<int, MockRent> rents = {};
@@ -301,11 +325,17 @@ final class _MockState {
     final code = _extractCode(text);
     final op = operations[tzid];
     if (op != null && op._status != OperationStatus.overOk) {
-      final sms =
-          MockSms._(service: service ?? op.service, text: text, code: code);
+      final sms = MockSms._(
+        service: service ?? op.service,
+        text: text,
+        code: code,
+        at: seq,
+      );
       op._messages.add(sms);
       op._status = OperationStatus.numAnswer;
-      _webhook('receiving_sms', tzid, op.country, op.number, sms);
+      // Activation: `+<digits>`, seconds left, the order time.
+      _webhook('receiving_sms', tzid, op.country, op.number, sms,
+          _operationTime, _stamp(op.tzid));
       return true;
     }
     final rent = rents[tzid];
@@ -315,11 +345,23 @@ final class _MockState {
         service: service ?? 'other',
         text: text,
         code: code,
+        at: id,
         id: id,
         createdAt: _stamp(id),
       );
       rent._messages.add(sms);
-      _webhook('rent_sms', tzid, rent.country, rent.number, sms);
+      if (rent._status == 0 && sms.service != _notify) {
+        // The first real SMS confirms the rent: the reservation is charged.
+        final cost = _toMills(rent._sum);
+        frozen -= cost;
+        balance -= cost;
+        rent._status = 1;
+      }
+      // Rent: full number in digits without `+`, minutes left, the SMS time.
+      final minutesLeft =
+          rent._status == 1 ? rent._days * 24 * 60 : _rentFirstSmsMinutes;
+      _webhook('rent_sms', tzid, rent.country, '${rent.country}${rent.number}',
+          sms, minutesLeft, _stamp(id));
       return true;
     }
     return false;
@@ -353,10 +395,17 @@ final class _MockState {
 
   /// No HTTP call: the mock only records what the backend would have sent.
   void _webhook(
-      String type, int tzid, int country, String number, MockSms sms) {
+    String type,
+    int tzid,
+    int country,
+    String number,
+    MockSms sms,
+    int timeLeft,
+    String timeStart,
+  ) {
     final url = webhookUrl;
     if (url == null) return;
-    final time = _stamp(seq);
+    final time = _stamp(sms._at);
     webhookLogs.add({
       'id': webhookLogs.length + 1,
       'user_id': _userId,
@@ -370,9 +419,9 @@ final class _MockState {
         'number': number,
         'sender': sms.service,
         'message': sms.text,
-        'code': sms.code,
-        'time_start': time,
-        'time_left': _operationTime,
+        'code': sms.code ?? '',
+        'time_start': timeStart,
+        'time_left': timeLeft,
       },
       'status': 'success',
       'error': null,

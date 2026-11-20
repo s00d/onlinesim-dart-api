@@ -23,13 +23,15 @@ final class RentSms {
   /// Message id.
   final int id;
 
-  /// Service of the SMS.
+  /// Sender. `notify`: a notice about a prohibited sender (does not confirm
+  /// the rent).
   final String service;
 
   /// Full text.
   final String text;
 
-  /// Code extracted from the text; empty when there is none.
+  /// Code extracted from the text; empty when there is none. The integer `0`
+  /// the server sends for a `notify` SMS becomes `'0'`.
   final String code;
 
   /// Arrival time.
@@ -63,7 +65,8 @@ final class RentItem {
     this.webhookUrl,
   });
 
-  /// Parses a rent item; `sum` from its decimal string, `extend` from `[]`.
+  /// Parses a rent item; `sum` from a number or a decimal string, `extend`
+  /// from `[]`.
   factory RentItem.fromJson(Map<String, Object?> json) => RentItem(
         tzid: asInt(json['tzid']) ?? 0,
         status: asInt(json['status']) ?? 0,
@@ -92,7 +95,7 @@ final class RentItem {
   /// Rent id.
   final int tzid;
 
-  /// Status code.
+  /// `0` reserved, waiting for the first SMS; `1` confirmed (charged).
   final int status;
 
   /// Number without the country code.
@@ -101,7 +104,9 @@ final class RentItem {
   /// Country code.
   final int country;
 
-  /// Price paid, USD (parsed from the server's decimal string).
+  /// Cost incl. extensions, USD (the server sends a number, or a decimal
+  /// string in `rent.state`). Reserved while [status] is 0, charged once
+  /// confirmed.
   final double sum;
 
   /// Rent period, days.

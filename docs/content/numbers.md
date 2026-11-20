@@ -77,7 +77,7 @@ Future<List<Operation>> state({bool messageToCode = true, SortOrder orderBy = So
 | `orderBy` | `SortOrder` | `SortOrder.asc` | Order of operations. |
 | `msgList` | `bool` | `false` | Fill `msgList` with every SMS (`List<OperationSms>`). |
 
-`Operation`: `tzid`, `response`, `number?`, `service?`, `country?`, `sum?`, `time?`, `msg?`, `msgList?`, `guardIntervalRemainingSeconds?`, …
+`Operation`: `tzid`, `response` (empty when the server sends none: no number issued yet), `number?`, `service?`, `country?`, `sum?`, `time?`, `msg?`, `msgList?`, `guardIntervalRemainingSeconds?`, …
 `response` is the state (constants in `OperationStatus`): `TZ_INPOOL` (number being assigned), `TZ_NUM_WAIT` (waiting for SMS), `TZ_NUM_ANSWER` (SMS arrived), `TZ_OVER_OK` (finished), `ERROR_NO_ITEMS` (failed). `msg` is `null` until the first SMS. The server caches answers for a few seconds.
 
 ```dart
@@ -118,7 +118,7 @@ Future<String> waitCode(int tzid, {Duration interval = const Duration(seconds: 5
 | `since` | `String?` | `null` | Ignore this value (the previous code). |
 | `sleep`, `now` | functions | `Future.delayed`, `DateTime.now` | Injectable for tests. |
 
-A transient `TransportException` is retried until the timeout; any `ApiException` is thrown at once.
+Transient errors are retried until the timeout: `TransportException`, and `ApiException` `TRY_AGAIN_LATER` (the HTTP 429 rate limit), `ERROR_UNDEFINED` and `INTERVAL_CONCURRENT_REQUESTS_ERROR`. Any other `ApiException` is thrown at once.
 
 ```dart
 final first = await client.numbers.waitCode(tzid, keepOpen: true);
@@ -138,6 +138,8 @@ Future<void> next(int tzid)
 ```dart
 await client.numbers.next(tzid);
 ```
+
+Errors: `ApiException` `ERROR_WRONG_TZID` (not an operation of your account), `ERROR_NO_TZID`.
 
 ## close
 
@@ -165,7 +167,7 @@ Future<void> ban(int tzid)
 await client.numbers.ban(tzid);
 ```
 
-Errors: as `close`.
+Errors: as `close`; `ApiException` with code `"0"` when the operation already has an SMS — nothing is changed then.
 
 ## tariffs
 

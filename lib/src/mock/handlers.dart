@@ -30,9 +30,13 @@ bool _flag(MockRequest req, String key) {
 int _int(MockRequest req, String key, int fallback) =>
     int.tryParse(req.query[key] ?? '') ?? fallback;
 
-/// USD with [digits] decimals, as the backend sends `balance` and rent `sum`.
+/// USD with [digits] decimals, as the backend sends `balance` and rent `sum`
+/// of getRentState.
 String _decimal(int mills, [int digits = 3]) =>
     _fromMills(mills).toStringAsFixed(digits);
+
+/// `YYYY-MM-DDTHH:MM:SS.000000Z`, the ISO-8601 form getFreeList sends.
+String _iso(int seconds) => '${_stamp(seconds).replaceFirst(' ', 'T')}.000000Z';
 
 (String, String) _countryName(int code) =>
     _countryNames[code] ?? ('country_$code', 'Country $code');
@@ -146,6 +150,9 @@ Object? _getNum(_MockState state, MockRequest req) {
     'country': country,
     'time': _operationTime,
     'service': service,
+    'title': service,
+    'response_text': 'Waiting for SMS',
+    'guard_interval_remaining_seconds': state.guardInterval,
   };
 }
 
@@ -166,17 +173,19 @@ Object? _getState(_MockState state, MockRequest req) {
 
 Object? _setOperationRevise(_MockState state, MockRequest req) {
   final tzid = _int(req, 'tzid', 0);
+  if (tzid == 0) return _error('ERROR_NO_TZID');
   final op = state.operations[tzid];
-  // Always succeeds, even for unknown tzids, like the backend.
-  if (op != null && op._status != OperationStatus.overOk) {
+  if (op == null) return _error('ERROR_WRONG_TZID');
+  if (op._status != OperationStatus.overOk) {
     op._cursor = op._messages.length;
     op._status = OperationStatus.numWait;
   }
-  return {'response': 1, 'tzid': tzid};
+  return {'tzid': '$tzid', 'response': '1'};
 }
 
 Object? _setOperationOk(_MockState state, MockRequest req) {
   final tzid = _int(req, 'tzid', 0);
+  if (tzid == 0) return _error('ERROR_NO_TZID');
   final op = state.operations[tzid];
   if (op == null || op._status == OperationStatus.overOk) {
     return _error('ERROR_WRONG_TZID');
@@ -233,16 +242,22 @@ Object? _getNumbersStats(_MockState state, MockRequest req) {
 
 // ----- rent -----
 
+/// A rent as the backend sends it. `sum` is a number in getRentNum /
+/// extendRentState and a 2-decimal string in getRentState ([stringSum]). An
+/// unconfirmed rent (`status` 0) waits 20 minutes for its first SMS.
 Map<String, Object?> _rentItem(
   _MockState state,
   MockRent rent,
-  MockRequest req,
-) {
+  MockRequest req, {
+  bool stringSum = false,
+}) {
   final tariff = state.rentTariffs[rent.country];
   final extendable = rent.extension && tariff?.extend == 1;
+  final confirmed = rent._status == 1;
   final start = rent.tzid;
+  final minutes = confirmed ? rent._days * 24 * 60 : _rentFirstSmsMinutes;
   return {
-    'status': 1,
+    'status': rent._status,
     'extension': rent.extension ? 1 : 0,
     'messages': [
       for (final m in rent._messages.reversed)
@@ -250,45 +265,53 @@ Map<String, Object?> _rentItem(
           'id': m.id,
           'service': m.service,
           'text': m.text,
-          'code': m.code ?? '',
+          // A notice about a prohibited sender carries the integer 0, other
+          // SMS a string ('' without a code).
+          'code': m.service == _notify ? 0 : m.code ?? '',
           'created_at': m.createdAt,
         },
     ],
     'webhook_url': state.webhookUrl,
-    'sum': _decimal(_toMills(rent._sum), 2),
+    'sum': stringSum ? _decimal(_toMills(rent._sum), 2) : rent._sum,
     'country': rent.country,
     'start_time': _stamp(start),
-    'stop_time': _stamp(start + rent._days * 86400),
+    'stop_time': _stamp(start + minutes * 60),
     'checked_time': _stamp(start),
     'number': rent.number,
-    'days_autoextend': 0,
-    'rent': 1,
+    'days_autoextend': rent.initialDays,
+    'rent': rent._days,
     'tzid': rent.tzid,
-    'time': rent._days * 24 * 60,
-    'days': rent._days,
-    'hours': rent._days * 24,
+    'time': minutes,
+    'days': confirmed ? rent._days : 0,
+    'hours': confirmed ? rent._days * 24 : 0,
     'extend': extendable
         ? {for (final e in tariff!.days.entries) '${e.key}': e.value}
         : <Object?>[],
-    'checked': true,
-    'reload': null,
+    'checked': confirmed,
+    'reload': rent.country == 7 ? 0 : null,
     'day_extend': extendable ? tariff!.days[1] ?? 0 : 0,
     'm_ext': false,
     'freeze': false,
-    if (req.query.containsKey('number')) 'time_seconds': rent._days * 86400,
+    if (req.query.containsKey('number')) ...{
+      'time_seconds': minutes * 60,
+      'guard_interval_remaining_seconds':
+          !confirmed && rent._messages.isEmpty ? state.guardInterval : 0,
+    },
   };
 }
 
 Object? _getRentNum(_MockState state, MockRequest req) {
   final country = _int(req, 'country', 7);
   final tariff = state.rentTariffs[country];
-  if (tariff == null) return _error('NO_COUNTRY');
+  if (tariff == null) return _error('UNDEFINED_COUNTRY');
   final days = _int(req, 'days', 1);
   final price = tariff.days[days];
   if (price == null) return _error('UNDEFINED_DAYS');
   if (state.available < _toMills(price)) return _error('WARNING_LOW_BALANCE');
   final tzid = state.nextId();
-  state.balance -= _toMills(price);
+  // Reserved, not charged: the first SMS that is not `notify` confirms the
+  // rent and charges it.
+  state.frozen += _toMills(price);
   final rent = MockRent._(
     tzid: tzid,
     country: country,
@@ -312,20 +335,25 @@ Object? _getRentState(_MockState state, MockRequest req) {
   }
   return {
     'response': 1,
-    'list': [for (final r in rents) _rentItem(state, r, req)],
+    'list': [for (final r in rents) _rentItem(state, r, req, stringSum: true)],
   };
 }
 
 Object? _extendRentState(_MockState state, MockRequest req) {
+  // Every refusal is TRY_AGAIN_LATER, like the backend: unknown tzid,
+  // unconfirmed rent, not extendable, unknown days.
   final rent = state.rents[_int(req, 'tzid', 0)];
-  if (rent == null) return _error('ERROR_WRONG_TZID');
-  final tariff = state.rentTariffs[rent.country];
-  if (!rent.extension || tariff == null || tariff.extend != 1) {
+  final tariff = rent == null ? null : state.rentTariffs[rent.country];
+  if (rent == null ||
+      tariff == null ||
+      rent._status != 1 ||
+      !rent.extension ||
+      tariff.extend != 1) {
     return _error('TRY_AGAIN_LATER');
   }
   final days = _int(req, 'days', 1);
   final price = tariff.days[days];
-  if (price == null) return _error('UNDEFINED_DAYS');
+  if (price == null) return _error('TRY_AGAIN_LATER');
   if (state.available < _toMills(price)) return _error('WARNING_LOW_BALANCE');
   state.balance -= _toMills(price);
   rent._days += days;
@@ -335,7 +363,19 @@ Object? _extendRentState(_MockState state, MockRequest req) {
 
 Object? _closeRentNum(_MockState state, MockRequest req) {
   final tzid = _int(req, 'tzid', 0);
-  if (state.rents.remove(tzid) == null) return _error('ERROR_WRONG_TZID');
+  final rent = state.rents[tzid];
+  if (rent == null) return _error('ERROR_NO_OPERATIONS');
+  if (rent._status == 0) {
+    // `guardInterval` stands in for the backend's first 120 s, during which a
+    // rent without any SMS stays open.
+    if (rent._messages.isEmpty && state.guardInterval > 0) {
+      return _error('NO_COMPLETE_TZID');
+    }
+    // Unconfirmed (no SMS or only `notify`): the reservation is released.
+    state.frozen -= _toMills(rent._sum);
+  }
+  // A confirmed rent closes without a refund.
+  state.rents.remove(tzid);
   state.scheduled.remove(tzid);
   return {'response': '1'};
 }
@@ -411,19 +451,15 @@ Object? _getProfile(_MockState state, MockRequest req) => {
       },
     };
 
-bool _isHttpUrl(String value) {
-  final uri = Uri.tryParse(value);
-  return uri != null &&
-      (uri.scheme == 'http' || uri.scheme == 'https') &&
-      uri.host.isNotEmpty;
-}
+/// The backend accepts any `scheme://…` URL.
+final _url = RegExp(r'^[a-z][a-z0-9+.-]*://\S+$', caseSensitive: false);
 
 Object? _profile(_MockState state, MockRequest req) {
   final body = req.body;
   final profile = body is Map ? body['profile'] : null;
   if (req.method != 'POST' || profile is! Map) return _error('ERROR_PARAMS');
   final url = profile['webhook_url'];
-  if (url != null && (url is! String || !_isHttpUrl(url))) {
+  if (url != null && (url is! String || !_url.hasMatch(url))) {
     return {
       'response': {
         'webhook_url': ['The webhook url must be a valid URL.'],
@@ -456,12 +492,21 @@ Object? _getPaymentHistory(_MockState state, MockRequest req) => {
         'getPaymentHistory.php',
       ),
       'paylist': <Object?>[],
-      'domains': <Object?>[],
+      'domains': ['onlinesim.io'],
+      'forms': {'1': 'Card'},
       'currency': {'USD': 1},
+      'buttons': {
+        'USD': [5, 10, 20],
+      },
     };
 
 // ----- free -----
 
+/// `ignore` of getFreeList: a note about prohibited services and their ids.
+const _freeIgnore =
+    '<p>Messages from these services are not shown:</p><p>1,2,3</p>';
+
+// Country 44 first, like the backend's list.
 const _free = {
   44: (
     name: 'united_kingdom',
@@ -483,9 +528,11 @@ const _free = {
 };
 
 Object? _getFreeList(_MockState state, MockRequest req) {
-  final codes = _free.keys.toList()..sort();
+  final codes = _free.keys.toList(); // 44 first, as the backend lists them
   final wanted = _int(req, 'country', 44);
   final country = _free.containsKey(wanted) ? wanted : codes.first;
+  final count = _int(req, 'count', 10).clamp(10, 500);
+  final page = _int(req, 'page', 1).clamp(1, 1 << 31);
   final data = _free[country]!;
   final numbers = {
     for (final n in data.numbers.keys)
@@ -509,7 +556,7 @@ Object? _getFreeList(_MockState state, MockRequest req) {
         'text': sms[i].$2,
         'in_number': sms[i].$1,
         'my_number': number,
-        'created_at': _stamp(i),
+        'created_at': _iso(i),
         'data_humans': '1 day ago',
         'code': _extractCode(sms[i].$2) ?? '-',
       },
@@ -526,15 +573,12 @@ Object? _getFreeList(_MockState state, MockRequest req) {
     ],
     'numbers': numbers,
     'messages': {
-      ..._paginate(
-        messages,
-        _int(req, 'page', 1),
-        _int(req, 'count', 10),
-        'getFreeList',
-      ),
+      ..._paginate(messages, page, count, 'getFreeList'),
       'number': number,
       'country': country,
     },
+    'ignore': _freeIgnore,
+    'content': null,
   };
 }
 

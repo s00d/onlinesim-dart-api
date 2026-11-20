@@ -3,6 +3,14 @@ import 'errors.dart';
 import 'json.dart';
 import 'models/numbers.dart';
 
+/// `waitCode` retries these error codes: the rate limit (HTTP 429), a
+/// transient server error, too many concurrent requests.
+const _retryable = {
+  'TRY_AGAIN_LATER',
+  'ERROR_UNDEFINED',
+  'INTERVAL_CONCURRENT_REQUESTS_ERROR',
+};
+
 /// Numbers for receiving SMS: `client.numbers`.
 final class NumbersApi {
   /// Internal: the client builds its sections.
@@ -91,7 +99,8 @@ final class NumbersApi {
     return list.first;
   }
 
-  /// Switches the operation to its next SMS and keeps it open.
+  /// Switches the operation to its next SMS and keeps it open. Throws
+  /// `ApiException('ERROR_WRONG_TZID')` for a tzid not of this account.
   Future<void> next(int tzid) async {
     await _request('setOperationRevise.php', query: {'tzid': tzid});
   }
@@ -101,8 +110,8 @@ final class NumbersApi {
     await _request('setOperationOk.php', query: {'tzid': tzid});
   }
 
-  /// Finishes the operation and reports the number as bad (only before any
-  /// SMS arrived).
+  /// Finishes the operation and reports the number as bad. After an SMS it
+  /// throws `ApiException('0')` and changes nothing.
   Future<void> ban(int tzid) async {
     await _request('setOperationOk.php', query: {'tzid': tzid, 'ban': true});
   }
@@ -131,7 +140,9 @@ final class NumbersApi {
   ///
   /// A finished operation (`TZ_OVER_OK`, `ERROR_NO_ITEMS`) without a new code
   /// throws [ApiException] with that state as the code. Running out of
-  /// [timeout] throws [WaitTimeoutException]. A [TransportException] is
+  /// [timeout] throws [WaitTimeoutException]. A [TransportException] and the
+  /// transient [ApiException] codes `TRY_AGAIN_LATER` (the HTTP 429 rate
+  /// limit), `ERROR_UNDEFINED` and `INTERVAL_CONCURRENT_REQUESTS_ERROR` are
   /// retried until the timeout; any other [ApiException] is thrown at once.
   /// [sleep] and [now] are injectable so tests run without real waiting.
   Future<String> waitCode(
@@ -153,6 +164,8 @@ final class NumbersApi {
         op = await stateOne(tzid, messageToCode: !fullMessage);
       } on TransportException {
         // transient: poll again
+      } on ApiException catch (e) {
+        if (!_retryable.contains(e.code)) rethrow;
       }
 
       if (op != null) {

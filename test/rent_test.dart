@@ -30,6 +30,45 @@ void main() {
     expect(rent.checked, isTrue);
   });
 
+  test('decodes sum as a number or a string; notify SMS code 0 → "0"',
+      () async {
+    final item = {
+      ...(_list()[0]! as Map).cast<String, Object?>(),
+      'status': 0,
+      'checked': false,
+      'sum': 1.5,
+      'messages': [
+        {
+          'id': 2,
+          'service': 'notify',
+          'text': 'Messages from this sender are not accepted',
+          'code': 0,
+          'created_at': '2026-11-19 10:01:12',
+        },
+        {
+          'id': 1,
+          'service': 'Google',
+          'text': 'G-070051',
+          'code': '070051',
+          'created_at': '2026-11-19 10:01:00',
+        },
+      ],
+    };
+    final (client, _) = fakeClient([
+      json({'response': 1, 'item': item}),
+      json({
+        'response': 1,
+        'list': [
+          {...item, 'sum': '2.40'},
+        ],
+      }),
+    ]);
+    final rent = await client.rent.get(country: 7, days: 3);
+    expect([rent.status, rent.checked, rent.sum], [0, false, 1.5]);
+    expect(rent.messages.map((m) => m.code), ['0', '070051']);
+    expect((await client.rent.stateOne(rent.tzid)).sum, 2.4);
+  });
+
   test('get with extension: false sends extension=0', () async {
     final (client, t) = fakeClient([
       json({'response': 1, 'item': _list()[1]}),

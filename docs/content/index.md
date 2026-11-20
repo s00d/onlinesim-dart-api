@@ -74,7 +74,7 @@ final http.Client httpClient = http.Client();
 final client = OnlineSim(apiKey: 'your-api-key', transport: HttpTransport(httpClient));
 ```
 
-Results are typed classes with camelCase fields (`guard_interval_remaining_seconds` → `guardIntervalRemainingSeconds`). Money the server sends as a decimal string (`balance`, rent `sum`) is a `double`, maps that arrive as an empty PHP array `[]` are `{}`, and maps keyed by country code or rent days have `int` keys.
+Results are typed classes with camelCase fields (`guard_interval_remaining_seconds` → `guardIntervalRemainingSeconds`). Money the server sends as a decimal string (`balance`, rent `sum` in `rent.state`) is a `double`, maps that arrive as an empty PHP array `[]` are `{}`, and maps keyed by country code or rent days have `int` keys. `paymentHistory().paylist` that arrives as a JSON array (ids 0, 1, 2…) is kept as a map keyed `'0'`, `'1'`, …
 
 ## Error handling
 
@@ -82,8 +82,8 @@ Every exception extends the sealed `OnlineSimException` (`message`).
 
 | Class | When | Fields |
 |---|---|---|
-| `ApiException` | The API answered with an error code (also a wrong key, HTTP 456). | `code`, `message` |
-| `NoNumberException` | `NO_NUMBER` / `NO_NUMBER_FOR_FORWARD`: no number right now. Subclass of `ApiException`. | `code`, `message` |
+| `ApiException` | The API answered with an error code (also a wrong key, HTTP 456, and the rate limit, HTTP 429 `TRY_AGAIN_LATER`). | `code`, `message` |
+| `NoNumberException` | `NO_NUMBER`: no number right now. Subclass of `ApiException`. | `code`, `message` |
 | `TransportException` | Network error, request timeout, or a body that is not JSON. | `status` (`null` without a response), `body` (first 500 chars) |
 | `WaitTimeoutException` | `waitCode` got no code within its `timeout`. | — |
 | `WebhookFormatException` | `parseWebhook` got something that is not a JSON object. | — |

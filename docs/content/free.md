@@ -22,8 +22,8 @@ Future<FreeList> list({int? country, String? number, int? page, int? count})
 
 `FreeList`:
 
-- `countries`: `List<FreeCountry>` — `country`, `countryText`, `countryOriginal`
-- `numbers`: `Map<String, FreeNumber>` keyed by the short number — `country`, `countryOriginal`, `fullNumber`, `dataHumans`, `isArchive`
+- `countries`: `List<FreeCountry>` — `country`, `countryText?`, `countryOriginal?` (`null` when the server has no name)
+- `numbers`: `Map<String, FreeNumber>` keyed by the short number — `country`, `countryOriginal?`, `fullNumber`, `dataHumans`, `isArchive`
 - `messages`: `FreeMessages`, a paginator of `FreeMessage` (`id`, `text`, `inNumber`, `myNumber`, `code`, `createdAt`, `dataHumans`) plus `number` and `country`; `code` is `-` when no code was found
 
 ```dart

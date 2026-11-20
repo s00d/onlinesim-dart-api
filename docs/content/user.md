@@ -13,7 +13,7 @@ Balance in USD.
 Future<Balance> balance()
 ```
 
-`Balance`: `balance`, `zbalance`, `income?`, and the getter `available`. `balance` includes the sum frozen by numbers in progress (`zbalance`): `available` = `balance − zbalance`. `income` is the partner income. The server caches the answer for 60 s.
+`Balance`: `balance`, `zbalance`, `income?`, and the getter `available`. `balance` includes the sum frozen by numbers and unconfirmed rents in progress (`zbalance`, which may be negative): `available` = `balance − max(zbalance, 0)`. `income` is the partner income. The server caches the answer for 60 s.
 
 ```dart
 final balance = await client.user.balance();
@@ -30,7 +30,7 @@ The account profile.
 Future<Profile> profile()
 ```
 
-`Profile`: `id`, `name?`, `username?`, `email?`, `locale?`, `currency?`, `numberCountry?`, `numberReject`, `webhookUrl?`, `apiAccess?`, …
+`Profile`: `id`, `name?`, `username?`, `email?`, `locale?`, `currency?`, `numberCountry?`, `numberReject`, `webhookUrl?`, `apiAccess?`, `number?` (`int`), `country?` (`String`), …
 
 ```dart
 final profile = await client.user.profile();
@@ -45,7 +45,7 @@ Top-up orders (paginated, newest first) and the available payment methods.
 Future<PaymentHistory> paymentHistory({int page = 1})
 ```
 
-`PaymentHistory`: `orders` (`Paginator<PaymentOrder>`), `paylist`, `domains`, `currency`. `PaymentOrder.sum` stays a decimal string (`"89.00"`); `PaymentOrder.raw` holds every field as sent.
+`PaymentHistory`: `orders` (`Paginator<PaymentOrder>`), `paylist`, `domains`, `currency`. `PaymentOrder.sum` stays a decimal string (`"89.00"`); `currency` and `formText` may be `null`; `PaymentOrder.raw` holds every field as sent. `paylist` maps a group id to its payment methods; when the server sends it as a JSON array (ids 0, 1, 2…) the keys are `'0'`, `'1'`, …
 
 ```dart
 final orders = (await client.user.paymentHistory()).orders;
