@@ -94,7 +94,8 @@ final class Operation {
   /// Operation id.
   final int tzid;
 
-  /// State, one of [OperationStatus].
+  /// State, one of [OperationStatus]; empty when the server sent none (no
+  /// number issued yet).
   final String response;
 
   /// Full number with `+`.

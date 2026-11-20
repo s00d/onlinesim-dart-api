@@ -1,4 +1,6 @@
 // MockOnlineSim through the real client: every endpoint, every control helper.
+import 'dart:convert';
+
 import 'package:onlinesim/onlinesim.dart';
 import 'package:test/test.dart';
 
@@ -6,9 +8,24 @@ import 'helpers.dart';
 
 Future<void> _noSleep(Duration _) async {}
 
+/// A raw request to the mock: (HTTP status, decoded body). [key] `null` sends
+/// no `Authorization` header.
+Future<(int, Object?)> _raw(
+  MockOnlineSim mock,
+  String pathAndQuery, {
+  String? key = 'mock-key',
+}) async {
+  final res = await mock.send(TransportRequest(
+    method: 'GET',
+    url: Uri.parse('https://x.test/api/$pathAndQuery'),
+    headers: {if (key != null) 'Authorization': 'Bearer $key'},
+  ));
+  return (res.status, jsonDecode(res.body));
+}
+
 void main() {
   group('auth and transport', () {
-    test('wrong or missing key answers HTTP 456, mapped to ApiException',
+    test('a wrong key is HTTP 456, a missing key HTTP 200; both ApiException',
         () async {
       final mock = MockOnlineSim();
       for (final key in ['nope', '']) {
@@ -17,13 +34,23 @@ void main() {
           throwsApi('ERROR_WRONG_KEY'),
         );
       }
+      final (status, body) = await _raw(mock, 'getBalance.php', key: null);
+      expect(status, 200);
+      expect(body, {'response': 'ERROR_WRONG_KEY'});
+      expect((await _raw(mock, 'getBalance.php', key: 'nope')).$1, 456);
     });
 
-    test('tariffs and free numbers need no key', () async {
-      final client = MockOnlineSim().client(apiKey: '');
+    test('tariffs and free numbers need no key, a sent wrong key is 456',
+        () async {
+      final mock = MockOnlineSim();
+      final client = mock.client(apiKey: '');
       expect((await client.numbers.tariffsOne(country: 44)).code, 44);
       expect((await client.rent.tariffsOne(country: 7)).code, 7);
       expect((await client.free.list()).messages.country, 44);
+      await expectLater(
+        mock.client(apiKey: 'nope').free.list(),
+        throwsApi('ERROR_WRONG_KEY'),
+      );
     });
 
     test('works as the transport of a client built by hand, any base URL',
@@ -71,9 +98,16 @@ void main() {
         [order.tzid, order.number, order.country, order.time, order.service],
         [2, '+7900000002', 7, 1200, 'vkcom'],
       );
+      expect(
+        [order.title, order.guardIntervalRemainingSeconds],
+        ['vkcom', 0],
+      );
       expect(mock.requests.map((r) => r.query['number']), [null, '1']);
       final b = await client.user.balance();
       expect([b.balance, b.zbalance, b.income], [100, 0.7, 0]);
+      final (_, raw) =
+          await _raw(MockOnlineSim(), 'getNum.php?service=vkcom&number=1');
+      expect(raw, containsPair('response_text', 'Waiting for SMS'));
       expect(
         mock.operations().map((o) => [o.tzid, o.number, o.status]),
         [
@@ -170,7 +204,27 @@ void main() {
         ['telegram', 'Welcome!'],
         ['telegram', '98765'],
       ]);
-      await client.numbers.next(424242); // always succeeds, like the backend
+      expect(
+        mock.requests.where((r) => r.path == 'setOperationRevise.php'),
+        hasLength(1),
+      );
+    });
+
+    test('next: {"tzid":"N","response":"1"}; ERROR_WRONG_TZID, ERROR_NO_TZID',
+        () async {
+      final mock = MockOnlineSim();
+      final client = mock.client();
+      final tzid = await client.numbers.get('google', country: 44);
+      final (status, body) =
+          await _raw(mock, 'setOperationRevise.php?tzid=$tzid');
+      expect(status, 200);
+      expect(body, {'tzid': '$tzid', 'response': '1'});
+      await expectLater(
+        client.numbers.next(424242),
+        throwsApi('ERROR_WRONG_TZID'),
+      );
+      await expectLater(client.numbers.next(0), throwsApi('ERROR_NO_TZID'));
+      await expectLater(client.numbers.close(0), throwsApi('ERROR_NO_TZID'));
     });
 
     test('close after SMS spends, without refunds; ban after SMS answers "0"',
@@ -289,7 +343,7 @@ void main() {
   });
 
   group('rent', () {
-    test('get charges, state lists, extend, close; non-extendable refused',
+    test('get reserves, the first SMS confirms and charges; extend; close',
         () async {
       final mock = MockOnlineSim(balance: 10);
       final client = mock.client();
@@ -298,33 +352,67 @@ void main() {
         [
           rent.tzid,
           rent.number,
+          rent.status,
+          rent.checked,
           rent.sum,
           rent.days,
           rent.time,
           rent.timeSeconds,
+          rent.daysAutoextend,
           rent.extension,
+          rent.guardIntervalRemainingSeconds,
           rent.messages,
         ],
-        [1, '900000001', 2.5, 3, 3 * 1440, 3 * 86400, 1, isEmpty],
+        [1, '900000001', 0, false, 2.5, 0, 20, 1200, 3, 1, 0, isEmpty],
       );
       expect(rent.extend, {1: 1, 3: 2.5, 7: 5});
-      expect(mock.balance(), 7.5);
+      // reserved: the total balance stays, the price is frozen
+      expect(mock.balance(), 10);
+      var b = await client.user.balance();
+      expect([b.balance, b.zbalance, b.available], [10, 2.5, 7.5]);
+      await expectLater(
+        client.rent.extend(rent.tzid), // not confirmed yet
+        throwsApi('TRY_AGAIN_LATER'),
+      );
 
       mock.addSms(rent.tzid, 'Bank: 777 888', service: 'bank');
       mock.addSms(rent.tzid, 'no code here');
       final state = await client.rent.stateOne(rent.tzid);
+      expect(
+        [state.status, state.checked, state.days, state.time],
+        [1, true, 3, 3 * 1440],
+      );
+      expect(state.timeSeconds, 3 * 86400);
       expect(state.messages.map((m) => [m.service, m.code]), [
         ['other', ''],
         ['bank', '777888'],
       ]); // newest first
+      expect(mock.balance(), 7.5);
+      b = await client.user.balance();
+      expect([b.balance, b.zbalance], [7.5, 0]);
 
       final extended = await client.rent.extend(rent.tzid, days: 1);
-      expect([extended.days, extended.sum], [4, 3.5]);
+      expect(
+        [extended.days, extended.daysAutoextend, extended.sum],
+        [4, 3, 3.5],
+      );
       expect(mock.balance(), 6.5);
+      expect(mock.rents().first.days, 4);
+      expect(mock.rents().first.initialDays, 3);
+      await expectLater(
+        client.rent.extend(rent.tzid, days: 2), // unknown period
+        throwsApi('TRY_AGAIN_LATER'),
+      );
+      await expectLater(
+        client.rent.extend(999), // unknown tzid
+        throwsApi('TRY_AGAIN_LATER'),
+      );
 
       final fixed = await client.rent.get(extension: false);
-      expect(fixed.extension, 0);
-      expect(fixed.extend, isEmpty);
+      mock.addSms(fixed.tzid, '1234');
+      final fixedState = await client.rent.stateOne(fixed.tzid);
+      expect(fixedState.extension, 0);
+      expect(fixedState.extend, isEmpty);
       await expectLater(
         client.rent.extend(fixed.tzid),
         throwsApi('TRY_AGAIN_LATER'),
@@ -334,7 +422,8 @@ void main() {
         [rent.tzid, fixed.tzid],
       );
 
-      await client.rent.close(fixed.tzid);
+      await client.rent.close(fixed.tzid); // confirmed: no refund
+      expect(mock.balance(), 5.5);
       expect(mock.rents().map((r) => r.tzid), [rent.tzid]);
       await expectLater(
         client.rent.stateOne(fixed.tzid),
@@ -342,13 +431,58 @@ void main() {
       );
       await expectLater(
         client.rent.close(fixed.tzid),
-        throwsApi('ERROR_WRONG_TZID'),
+        throwsApi('ERROR_NO_OPERATIONS'),
       );
+    });
+
+    test('sum: a number in getRentNum, a decimal string in getRentState',
+        () async {
+      final mock = MockOnlineSim();
+      final (_, got) = await _raw(mock, 'rent/getRentNum.php?days=3');
+      expect(((got! as Map)['item'] as Map)['sum'], 2.5);
+      final (_, listed) = await _raw(mock, 'rent/getRentState.php');
+      expect((((listed! as Map)['list'] as List).first as Map)['sum'], '2.50');
+    });
+
+    test('unconfirmed rent: close releases; notify SMS is code 0; guard',
+        () async {
+      final mock = MockOnlineSim(balance: 10, guardInterval: 120);
+      final client = mock.client();
+      final rent = await client.rent.get(days: 3);
+      expect(rent.guardIntervalRemainingSeconds, 120);
+      await expectLater(
+        client.rent.close(rent.tzid),
+        throwsApi('NO_COMPLETE_TZID'),
+      );
+      mock.addSms(
+        rent.tzid,
+        'Messages from this sender are not accepted',
+        service: 'notify',
+      );
+      final (_, raw) = await _raw(mock, 'rent/getRentState.php');
+      final item = ((raw! as Map)['list'] as List).first as Map;
+      expect((item['messages'] as List).first, containsPair('code', 0));
+      final state = await client.rent.stateOne(rent.tzid);
+      expect(
+        [state.status, state.checked, state.guardIntervalRemainingSeconds],
+        [0, false, 0],
+      );
+      expect(
+        [state.messages.first.service, state.messages.first.code],
+        ['notify', '0'],
+      );
+      await client.rent.close(rent.tzid);
+      expect(mock.balance(), 10); // released, nothing charged
+      final b = await client.user.balance();
+      expect([b.balance, b.zbalance], [10, 0]);
     });
 
     test('rent errors: unknown country, unknown days, low balance', () async {
       final client = MockOnlineSim(balance: 1.5).client();
-      await expectLater(client.rent.get(country: 44), throwsApi('NO_COUNTRY'));
+      await expectLater(
+        client.rent.get(country: 44),
+        throwsApi('UNDEFINED_COUNTRY'),
+      );
       await expectLater(client.rent.get(days: 2), throwsApi('UNDEFINED_DAYS'));
       await expectLater(
         client.rent.get(days: 3),
@@ -363,7 +497,9 @@ void main() {
       final tzid = (await client.rent.get()).tzid;
       mock.addSmsAfter(tzid, '6060', 1);
       expect((await client.rent.stateOne(tzid)).messages, isEmpty);
-      final sms = (await client.rent.state()).first.messages.first;
+      final listed = (await client.rent.state()).first;
+      expect(listed.status, 1);
+      final sms = listed.messages.first;
       expect([sms.code, sms.service], ['6060', 'other']);
       final tariffs = await client.rent.tariffs();
       expect(tariffs.keys, [7]);
@@ -398,9 +534,10 @@ void main() {
         null,
       ]);
       await expectLater(
-        client.user.setWebhookUrl('ftp://x'),
+        client.user.setWebhookUrl('not a url'),
         throwsApi('VALIDATION_ERROR', 'The webhook url must be a valid URL.'),
       );
+      await client.user.setWebhookUrl('ftp://x'); // any scheme://… URL
       await client.user.setWebhookUrl('https://example.com/hook');
       final req = mock.requests.last;
       expect([req.method, req.path], ['POST', 'profile.php']);
@@ -416,14 +553,28 @@ void main() {
       mock.addSms(tzid, 'code 1234');
       final rent = await client.rent.get();
       mock.addSms(rent.tzid, 'code 5678');
+      mock.addSms(rent.tzid, 'no code');
       final logs = await client.user.webhookLogs();
-      expect([logs.total, logs.currentPage, logs.perPage], [2, 1, 10]);
+      expect([logs.total, logs.currentPage, logs.perPage], [3, 1, 10]);
       expect(
         logs.data.map((l) => [l.type, l.params.operationId, l.params.code]),
         [
+          [WebhookType.rentSms, rent.tzid, ''],
           [WebhookType.rentSms, rent.tzid, '5678'],
           [WebhookType.receivingSms, tzid, '1234'],
         ],
+      );
+      // activation: +number, seconds left, order time;
+      // rent: digits without +, minutes left, SMS time
+      final activation = logs.data[2].params;
+      expect(
+        [activation.number, activation.timeLeft, activation.timeStart],
+        ['+44900000001', 1200, '2026-01-01 00:00:01'],
+      );
+      final rentLog = logs.data[1].params;
+      expect(
+        [rentLog.number, rentLog.timeLeft, rentLog.timeStart],
+        ['7900000002', 1440, '2026-01-01 00:00:03'],
       );
 
       await client.user.clearWebhookUrl();
@@ -439,6 +590,15 @@ void main() {
       expect([b.balance, b.zbalance, b.income], [3, 1.2, 0]);
       final history = await client.user.paymentHistory();
       expect(history.paylist, isEmpty);
+      expect(history.domains, ['onlinesim.io']);
+      final (_, raw) = await _raw(mock, 'getPaymentHistory.php');
+      expect(raw, containsPair('forms', {'1': 'Card'}));
+      expect(
+        raw,
+        containsPair('buttons', {
+          'USD': [5, 10, 20],
+        }),
+      );
       expect(history.orders.data, isEmpty);
       expect(history.orders.total, 0);
       expect(history.orders.currentPage, 1);
@@ -448,13 +608,27 @@ void main() {
         () async {
       final client = MockOnlineSim().client();
       final uk = await client.free.list();
-      expect(uk.countries.map((c) => c.country), [7, 44]);
+      expect(uk.countries.map((c) => c.country), [44, 7]);
       expect(uk.numbers.keys, ['7459608320']);
       expect(
-        [uk.messages.number, uk.messages.country, uk.messages.total],
-        ['7459608320', 44, 2],
+        [
+          uk.messages.number,
+          uk.messages.country,
+          uk.messages.total,
+          uk.messages.perPage,
+        ],
+        ['7459608320', 44, 2, 10],
       );
       expect(uk.messages.data.first.code, '195895');
+      expect(uk.messages.data.first.createdAt, '2026-01-01T00:00:00.000000Z');
+      // count clamped to 10..500
+      expect((await client.free.list(count: 0)).messages.perPage, 10);
+      expect((await client.free.list(count: 9999)).messages.perPage, 500);
+      // unknown country → the first one
+      expect((await client.free.list(country: 999)).messages.country, 44);
+      final (_, raw) = await _raw(MockOnlineSim(), 'getFreeList', key: null);
+      expect(raw, containsPair('content', null));
+      expect(raw, containsPair('ignore', isA<String>()));
       final ru = await client.free.list(country: 7);
       expect(ru.messages.data.first.code, '51423');
       expect(ru.messages.data.first.myNumber, '9001234567');

@@ -24,6 +24,29 @@ void main() {
     expect(list.messages.total, 426);
   });
 
+  test('list accepts null country_text / country_original', () async {
+    final (client, _) = fakeClient([
+      json({
+        'response': 1,
+        'countries': [
+          {'country': 999, 'country_text': null, 'country_original': null},
+        ],
+        'numbers': {
+          '1': {
+            'country': 999,
+            'country_original': null,
+            'full_number': '9991'
+          },
+        },
+        'messages': {'data': <Object?>[]},
+      }),
+    ]);
+    final list = await client.free.list();
+    final c = list.countries.single;
+    expect([c.country, c.countryText, c.countryOriginal], [999, null, null]);
+    expect(list.numbers['1']!.countryOriginal, isNull);
+  });
+
   test('list normalises [] numbers', () async {
     final (client, t) = fakeClient([
       json({

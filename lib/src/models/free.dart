@@ -6,25 +6,25 @@ final class FreeCountry {
   /// Creates a country entry.
   const FreeCountry({
     required this.country,
-    required this.countryText,
-    required this.countryOriginal,
+    this.countryText,
+    this.countryOriginal,
   });
 
   /// Parses a `countries` item.
   factory FreeCountry.fromJson(Map<String, Object?> json) => FreeCountry(
         country: asInt(json['country']) ?? 0,
-        countryText: asString(json['country_text']) ?? '',
-        countryOriginal: asString(json['country_original']) ?? '',
+        countryText: asString(json['country_text']),
+        countryOriginal: asString(json['country_original']),
       );
 
   /// Country code.
   final int country;
 
-  /// Localised name.
-  final String countryText;
+  /// Localised name; `null` when the server has none.
+  final String? countryText;
 
-  /// Name (slug).
-  final String countryOriginal;
+  /// Name (slug); `null` when the server has none.
+  final String? countryOriginal;
 }
 
 /// A free number.
@@ -32,16 +32,16 @@ final class FreeNumber {
   /// Creates a number entry.
   const FreeNumber({
     required this.country,
-    required this.countryOriginal,
     required this.fullNumber,
     required this.dataHumans,
     required this.isArchive,
+    this.countryOriginal,
   });
 
   /// Parses a `numbers` value.
   factory FreeNumber.fromJson(Map<String, Object?> json) => FreeNumber(
         country: asInt(json['country']) ?? 0,
-        countryOriginal: asString(json['country_original']) ?? '',
+        countryOriginal: asString(json['country_original']),
         fullNumber: asString(json['full_number']) ?? '',
         dataHumans: asString(json['data_humans']) ?? '',
         isArchive: asBool(json['is_archive']),
@@ -50,8 +50,8 @@ final class FreeNumber {
   /// Country code.
   final int country;
 
-  /// Country name (slug).
-  final String countryOriginal;
+  /// Country name (slug); `null` when the server has none.
+  final String? countryOriginal;
 
   /// Number with the country code, without `+`.
   final String fullNumber;

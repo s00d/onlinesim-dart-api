@@ -11,7 +11,7 @@ final class UserApi {
   final RequestFn _request;
 
   /// Balance in USD. `balance` includes the frozen `zbalance`:
-  /// available = balance − zbalance ([Balance.available]).
+  /// available = balance − max(zbalance, 0) ([Balance.available]).
   Future<Balance> balance() async {
     final res = await _request('getBalance.php', query: {'income': 1});
     return Balance.fromJson(asMap(res));

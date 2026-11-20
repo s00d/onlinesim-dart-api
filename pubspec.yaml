@@ -2,7 +2,7 @@ name: onlinesim
 description: >-
   Typed Dart client for the OnlineSim SMS API: numbers, rent, account, free
   numbers and webhooks, with a built-in offline mock for tests. Flutter and web.
-version: 1.0.0
+version: 1.0.1
 homepage: https://s00d.github.io/onlinesim-dart-api/
 repository: https://github.com/s00d/onlinesim-dart-api
 issue_tracker: https://github.com/s00d/onlinesim-dart-api/issues

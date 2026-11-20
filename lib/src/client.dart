@@ -137,7 +137,8 @@ final class OnlineSim {
       );
     }
     // The body is checked before the status: a wrong key is HTTP 456 with
-    // {"response":"ERROR_WRONG_KEY"}.
+    // {"response":"ERROR_WRONG_KEY"}, the rate limit HTTP 429 with
+    // {"response":"TRY_AGAIN_LATER"}.
     if (data is Map && data.containsKey('response')) {
       return _unwrap(data.cast<String, Object?>());
     }
@@ -167,7 +168,7 @@ Map<String, Object?> _unwrap(Map<String, Object?> data) {
   // Debug backends echo the code as `message`; prefer the readable fallback.
   final raw = data['message'];
   final message = raw is String && raw != code ? raw : null;
-  if (code == 'NO_NUMBER' || code == 'NO_NUMBER_FOR_FORWARD') {
+  if (code == 'NO_NUMBER') {
     throw NoNumberException(code, message);
   }
   throw ApiException(code, message);

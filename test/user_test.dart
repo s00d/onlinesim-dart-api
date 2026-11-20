@@ -49,6 +49,56 @@ void main() {
     expect((await client.user.profile()).numberReject, ['4470', '4471']);
   });
 
+  test('balance: available = balance − max(zbalance, 0)', () async {
+    final (client, _) = fakeClient([
+      json({'response': '1', 'balance': '10.000', 'zbalance': -2.5}),
+    ]);
+    final b = await client.user.balance();
+    expect([b.zbalance, b.available], [-2.5, 10]);
+  });
+
+  test('profile: number int|null, country string|null', () async {
+    final (client, _) = fakeClient([
+      json({
+        'response': '1',
+        'profile': {'id': 1, 'number': 79001234567, 'country': 'RU'},
+      }),
+    ]);
+    final p = await client.user.profile();
+    expect([p.number, p.country], [79001234567, 'RU']);
+  });
+
+  test('paymentHistory keeps a JSON-array paylist; nullable order fields',
+      () async {
+    final body = fixtureMap('getPaymentHistory');
+    final paylist = [
+      {'id': 0, 'name': 'Card'},
+      {'id': 1, 'name': 'Crypto'},
+    ];
+    final order = {
+      'id': 1,
+      'sum': '10.00',
+      'currency': null,
+      'form_text': null,
+      'stat': 0,
+      'created_at': '2026-06-14 09:12:12',
+    };
+    final (client, _) = fakeClient([
+      json({
+        ...body,
+        'paylist': paylist,
+        'orders': {
+          ...(body['orders']! as Map).cast<String, Object?>(),
+          'data': [order],
+        },
+      }),
+    ]);
+    final h = await client.user.paymentHistory();
+    expect(h.paylist, {'0': paylist[0], '1': paylist[1]});
+    final o = h.orders.data.single;
+    expect([o.currency, o.formText], [null, null]);
+  });
+
   test('paymentHistory normalises the [] paylist', () async {
     final (client, t) = fakeClient([json(fixture('getPaymentHistory'))]);
     final h = await client.user.paymentHistory(page: 2);

@@ -14,17 +14,18 @@ final class Balance {
         income: asDouble(json['income']),
       );
 
-  /// Total balance. Includes [zbalance]: available = balance − zbalance.
+  /// Total balance. Includes [zbalance]:
+  /// available = balance − max(zbalance, 0).
   final double balance;
 
-  /// Sum frozen by numbers in progress.
+  /// Sum frozen by numbers and unconfirmed rents in progress; may be negative.
   final double zbalance;
 
   /// Partner income, when sent.
   final double? income;
 
-  /// Spendable part: [balance] − [zbalance].
-  double get available => balance - zbalance;
+  /// Spendable part: [balance] − max([zbalance], 0).
+  double get available => balance - (zbalance > 0 ? zbalance : 0);
 }
 
 /// The account profile.
@@ -69,8 +70,8 @@ final class Profile {
           ? listOf(reject.values.toList(), asString)
           : listOf(reject, asString),
       webhookUrl: asString(json['webhook_url']),
-      number: asString(json['number']),
-      country: asInt(json['country']),
+      number: asInt(json['number']),
+      country: asString(json['country']),
       isApi: json['is_api'] == null ? null : asBool(json['is_api']),
       createdAt: asString(json['created_at']),
     );
@@ -115,11 +116,11 @@ final class Profile {
   /// URL that receives SMS webhooks.
   final String? webhookUrl;
 
-  /// Phone number of the account.
-  final String? number;
+  /// Phone number of the account, digits.
+  final int? number;
 
   /// Country of the account.
-  final int? country;
+  final String? country;
 
   /// API user.
   final bool? isApi;
@@ -134,9 +135,9 @@ final class PaymentOrder {
   const PaymentOrder({
     required this.id,
     required this.sum,
-    required this.currency,
     required this.stat,
     required this.createdAt,
+    this.currency,
     this.formText,
     this.statusText,
     this.raw = const {},
@@ -146,7 +147,7 @@ final class PaymentOrder {
   factory PaymentOrder.fromJson(Map<String, Object?> json) => PaymentOrder(
         id: asInt(json['id']) ?? 0,
         sum: asString(json['sum']) ?? '',
-        currency: asString(json['currency']) ?? '',
+        currency: asString(json['currency']),
         stat: asInt(json['stat']) ?? 0,
         formText: asString(json['form_text']),
         statusText: asString(json['status_text']),
@@ -160,8 +161,8 @@ final class PaymentOrder {
   /// Decimal string, e.g. `"89.00"`.
   final String sum;
 
-  /// Currency.
-  final String currency;
+  /// Currency; `null` when the server sent none.
+  final String? currency;
 
   /// Status code.
   final int stat;
@@ -189,11 +190,17 @@ final class PaymentHistory {
     this.currency = const {},
   });
 
-  /// Parses `getPaymentHistory`; `paylist` from `[]`.
+  /// Parses `getPaymentHistory`. A `paylist` sent as a JSON array (group ids
+  /// 0, 1, 2…) is kept as an index-keyed map (`'0'`, `'1'`, …); `[]` is `{}`.
   factory PaymentHistory.fromJson(Map<String, Object?> json) => PaymentHistory(
         orders:
             Paginator.fromJson(asMap(json['orders']), PaymentOrder.fromJson),
-        paylist: asMap(json['paylist']),
+        paylist: switch (json['paylist']) {
+          final List<Object?> list => {
+              for (var i = 0; i < list.length; i++) '$i': list[i],
+            },
+          final other => asMap(other),
+        },
         domains: listOf(json['domains'], asString),
         currency: stringKeyed(json['currency'], asDouble),
       );
@@ -201,7 +208,7 @@ final class PaymentHistory {
   /// Orders, newest first.
   final Paginator<PaymentOrder> orders;
 
-  /// Payment methods by list id, as sent.
+  /// Payment methods by group id.
   final Map<String, Object?> paylist;
 
   /// Payment domains.

@@ -181,6 +181,44 @@ void main() {
     expect(query(t.last), {'tzid': '1520', 'ban': '1'});
   });
 
+  test('ban after an SMS: "0" is ApiException("0") with a readable message',
+      () async {
+    final (client, _) = fakeClient([
+      json({'response': '0'}),
+    ]);
+    await expectLater(
+      client.numbers.ban(1520),
+      throwsApi('0', 'Ban not applied: the operation already has an SMS'),
+    );
+  });
+
+  test('next accepts {"tzid":"N","response":"1"}; ERROR_WRONG_TZID', () async {
+    final (client, _) = fakeClient([
+      json({'tzid': '1520', 'response': '1'}),
+      json({'response': 'ERROR_WRONG_TZID'}),
+    ]);
+    await client.numbers.next(1520);
+    await expectLater(client.numbers.next(1), throwsApi('ERROR_WRONG_TZID'));
+  });
+
+  test('stateOne accepts an operation without `response`', () async {
+    final (client, _) = fakeClient([
+      json([
+        {
+          'tzid': 5,
+          'country': 7,
+          'service': 'vkcom',
+          'sum': 0.5,
+          'time': 900,
+          'form': 'index',
+        },
+      ]),
+    ]);
+    final op = await client.numbers.stateOne(5);
+    expect(op.tzid, 5);
+    expect(op.response, isEmpty);
+  });
+
   test('close surfaces NO_COMPLETE_TZID', () async {
     final (client, _) = fakeClient([
       json({'response': 'NO_COMPLETE_TZID'}),

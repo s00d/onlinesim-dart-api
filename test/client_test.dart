@@ -89,14 +89,58 @@ void main() {
       );
     });
 
-    test('maps NO_NUMBER_FOR_FORWARD to NoNumberException', () async {
+    test('maps HTTP 429 TRY_AGAIN_LATER (rate limit) to ApiException',
+        () async {
       final (client, _) = fakeClient([
-        json({'response': 'NO_NUMBER_FOR_FORWARD'}),
+        json({'response': 'TRY_AGAIN_LATER'}, status: 429),
+      ]);
+      await expectLater(
+        client.numbers.state(),
+        throwsA(isA<ApiException>()
+            .having((e) => e.code, 'code', 'TRY_AGAIN_LATER')
+            .having((e) => e, 'not NoNumber', isNot(isA<NoNumberException>()))),
+      );
+    });
+
+    test('maps a missing key (HTTP 200 ERROR_WRONG_KEY) to ApiException',
+        () async {
+      final (client, _) = fakeClient([
+        json({'response': 'ERROR_WRONG_KEY'}),
+      ], apiKey: null);
+      await expectLater(
+        client.user.balance(),
+        throwsApi('ERROR_WRONG_KEY', 'Wrong or missing API key'),
+      );
+    });
+
+    test('maps only NO_NUMBER to NoNumberException; new codes have messages',
+        () async {
+      final (client, _) = fakeClient([
+        json({'response': 'FORWARD_NOT_SUPPORTED'}),
       ]);
       await expectLater(
         client.numbers.get('google'),
-        throwsA(isA<NoNumberException>()),
+        throwsA(isA<ApiException>()
+            .having((e) => e, 'type', isNot(isA<NoNumberException>()))
+            .having((e) => e.message, 'message',
+                'Number forwarding is no longer available')),
       );
+      for (final code in [
+        'ACCOUNT_CLEANED',
+        'USER_NOT_ACTIVATED',
+        'ERROR_UNDEFINED',
+        '0',
+      ]) {
+        expect(errorMessages[code], isNotEmpty, reason: code);
+      }
+      for (final code in [
+        'ERROR_NO_KEY',
+        'NO_NUMBER_FOR_FORWARD',
+        'ACCOUNT_IDENTIFICATION_REQUIRED',
+        'API_DISABLED',
+      ]) {
+        expect(errorMessages.containsKey(code), isFalse, reason: code);
+      }
     });
 
     test('maps HTTP 456 ERROR_WRONG_KEY to ApiException (body before status)',
@@ -106,7 +150,7 @@ void main() {
       ]);
       await expectLater(
         client.user.balance(),
-        throwsApi('ERROR_WRONG_KEY', 'Wrong API key'),
+        throwsApi('ERROR_WRONG_KEY', 'Wrong or missing API key'),
       );
     });
 
@@ -228,7 +272,7 @@ void main() {
     test('exceptions print their code', () {
       expect(
         ApiException('ERROR_WRONG_KEY').toString(),
-        'ApiException(ERROR_WRONG_KEY): Wrong API key',
+        'ApiException(ERROR_WRONG_KEY): Wrong or missing API key',
       );
       expect(errorMessages['NO_COMPLETE_TZID'], isNotEmpty);
     });

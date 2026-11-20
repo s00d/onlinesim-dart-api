@@ -32,8 +32,8 @@ final class MockOnlineSim implements OnlineSimTransport {
   /// [apiKey] is the key it accepts as `Authorization: Bearer <apiKey>`.
   /// [balance] is the starting balance, USD. [prices] and [rentTariffs]
   /// replace [defaultMockPrices] and [defaultMockRentTariffs]. With
-  /// [guardInterval] (seconds) `> 0` an operation without SMS cannot be
-  /// closed (`NO_COMPLETE_TZID`).
+  /// [guardInterval] (seconds) `> 0` an operation without SMS, or an
+  /// unconfirmed rent without any SMS, cannot be closed (`NO_COMPLETE_TZID`).
   MockOnlineSim({
     String apiKey = 'mock-key',
     double balance = 100,
@@ -69,6 +69,9 @@ final class MockOnlineSim implements OnlineSimTransport {
 
   /// An SMS arrives now at number operation or rent [tzid]. Throws
   /// [StateError] when there is no open operation or rent with that id.
+  /// The first rent SMS whose [service] is not `notify` confirms the rent and
+  /// charges it; `service: 'notify'` adds a notice with `code` `0` that
+  /// confirms nothing.
   void addSms(int tzid, String text, {String? service}) {
     if (!_state.deliver(tzid, text, service)) {
       throw StateError('MockOnlineSim: no open operation or rent $tzid');
@@ -99,8 +102,8 @@ final class MockOnlineSim implements OnlineSimTransport {
   /// Sets the total balance, USD.
   void setBalance(double usd) => _state.balance = _toMills(usd);
 
-  /// Total balance, USD, including the part frozen by open operations (as
-  /// `user.balance()` reports it).
+  /// Total balance, USD, including the part frozen by open operations and
+  /// unconfirmed rents (as `user.balance()` reports it).
   double balance() => _fromMills(_state.balance);
 
   /// Number operations, oldest first (snapshots).
@@ -142,9 +145,14 @@ final class MockOnlineSim implements OnlineSimTransport {
 
     final handler = _routes[req.path];
     if (handler == null) return _text(404, 'Not Found');
-    if (!_publicPaths.contains(req.path) &&
-        _header(request.headers, 'authorization') != 'Bearer ${state.apiKey}') {
+    // A wrong key is HTTP 456 (public endpoints check a sent key too); no key
+    // at all is HTTP 200.
+    final auth = _header(request.headers, 'authorization');
+    if (auth != null && auth != 'Bearer ${state.apiKey}') {
       return _json({'response': 'ERROR_WRONG_KEY'}, 456);
+    }
+    if (auth == null && !_publicPaths.contains(req.path)) {
+      return _json({'response': 'ERROR_WRONG_KEY'});
     }
     return _json(handler(state, req));
   }

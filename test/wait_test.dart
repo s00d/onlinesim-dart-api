@@ -165,7 +165,44 @@ void main() {
     expect(await h.wait(7), '42');
   });
 
-  test('raises any ApiException at once', () async {
+  for (final code in [
+    'TRY_AGAIN_LATER',
+    'ERROR_UNDEFINED',
+    'INTERVAL_CONCURRENT_REQUESTS_ERROR',
+  ]) {
+    test('retries ApiException($code) until the code arrives', () async {
+      final h = _Harness([
+        json({'response': code}, status: code == 'TRY_AGAIN_LATER' ? 429 : 200),
+        {'msg': '42'},
+      ]);
+      expect(await h.wait(7), '42');
+      expect(
+        h.log,
+        ['state 7 code=1', 'sleep 5000', 'state 7 code=1', 'close 7'],
+      );
+    });
+  }
+
+  test('a retryable ApiException still ends in WaitTimeoutException', () async {
+    final h = _Harness([
+      for (var i = 0; i < 10; i++) json({'response': 'TRY_AGAIN_LATER'}),
+    ]);
+    await expectLater(
+      h.wait(7, timeout: const Duration(seconds: 10)),
+      throwsA(isA<WaitTimeoutException>()),
+    );
+    expect(h.clock, 10000);
+  });
+
+  test('an operation without `response` keeps polling', () async {
+    final h = _Harness([
+      {'response': null},
+      {'msg': '77'},
+    ]);
+    expect(await h.wait(7), '77');
+  });
+
+  test('raises any other ApiException at once', () async {
     final h = _Harness([
       json({'response': 'ERROR_NO_OPERATIONS'}),
     ]);
